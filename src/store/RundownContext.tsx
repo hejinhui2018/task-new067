@@ -1,12 +1,12 @@
 import { createContext, useContext } from 'react';
 import type { Dispatch } from 'react';
 import type { RundownState } from '../types';
-import type { ScheduleResult } from '../engine/schedule';
+import type { ShowSchedule } from '../engine/multiSchedule';
 import type { RundownAction } from './reducer';
 
 export interface RundownContextValue {
   present: RundownState;
-  schedule: ScheduleResult;
+  schedule: ShowSchedule;
   dispatch: Dispatch<RundownAction>;
   canUndo: boolean;
   canRedo: boolean;

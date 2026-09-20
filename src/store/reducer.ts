@@ -1,6 +1,11 @@
 import type { RundownState, Segment, SegmentKind } from '../types';
-import { computeSchedule } from '../engine/schedule';
+import { MIN_SEGMENT_DURATION } from '../types';
+import { computeVenueSchedule } from '../engine/schedule';
+import { applyOps, lastLockedIndex } from '../engine/resources';
+import type { StateOp } from '../engine/resources';
 import { createDefaultShow } from './defaultShow';
+
+export { MIN_SEGMENT_DURATION };
 
 /** 撤销/重做历史栈：present 为唯一数据源，时间轴与冲突全部由它推导 */
 export interface HistoryState {
@@ -9,18 +14,22 @@ export interface HistoryState {
   future: RundownState[];
 }
 
-export const MIN_SEGMENT_DURATION = 30;
 const HISTORY_LIMIT = 100;
 
 export type RundownAction =
-  | { type: 'UPDATE_DURATION'; id: string; duration: number }
-  | { type: 'UPDATE_TITLE'; id: string; title: string }
-  | { type: 'CHANGE_KIND'; id: string; kind: Exclude<SegmentKind, 'fixed'> }
-  | { type: 'TOGGLE_FIXED'; id: string }
-  | { type: 'UPDATE_FIXED_START'; id: string; offset: number }
-  | { type: 'REORDER'; from: number; to: number }
-  | { type: 'INSERT_AT'; index: number; segment: Segment }
-  | { type: 'DELETE'; id: string }
+  | { type: 'UPDATE_DURATION'; venueId: string; id: string; duration: number }
+  | { type: 'UPDATE_TITLE'; venueId: string; id: string; title: string }
+  | { type: 'UPDATE_RESOURCES'; venueId: string; id: string; resources: string[] }
+  | { type: 'CHANGE_KIND'; venueId: string; id: string; kind: Exclude<SegmentKind, 'fixed'> }
+  | { type: 'TOGGLE_FIXED'; venueId: string; id: string }
+  | { type: 'UPDATE_FIXED_START'; venueId: string; id: string; offset: number }
+  | { type: 'REORDER'; venueId: string; from: number; to: number }
+  | { type: 'INSERT_AT'; venueId: string; index: number; segment: Segment }
+  | { type: 'DELETE'; venueId: string; id: string }
+  | { type: 'MOVE_BETWEEN_VENUES'; segmentId: string; fromVenueId: string; toVenueId: string; index: number }
+  | { type: 'APPLY_OPS'; ops: StateOp[] }
+  | { type: 'LOCK_EXECUTED'; offset: number }
+  | { type: 'CLEAR_EXECUTED_LOCKS' }
   | { type: 'SET_SHOW_START'; seconds: number }
   | { type: 'RESET' }
   | { type: 'UNDO' }
@@ -51,8 +60,35 @@ function clampDuration(seg: Segment, requested: number): number {
   return Math.max(Math.round(requested), floor, minByKind);
 }
 
-function mapSegments(state: HistoryState, fn: (s: Segment) => Segment): HistoryState {
-  return commit(state, { ...state.present, segments: state.present.segments.map(fn) });
+/** 各场地「已执行前缀」锁定的环节集合（由排程推导，与引擎口径一致） */
+function lockedIdsByVenue(present: RundownState): Map<string, Set<string>> {
+  return new Map(
+    present.venues.map((v) => [
+      v.id,
+      computeVenueSchedule(v, present.executedUntil[v.id] ?? 0).lockedIds,
+    ]),
+  );
+}
+
+function isLocked(locks: Map<string, Set<string>>, venueId: string, segmentId: string): boolean {
+  return locks.get(venueId)?.has(segmentId) ?? false;
+}
+
+function mapVenueSegments(
+  state: HistoryState,
+  venueId: string,
+  fn: (s: Segment) => Segment,
+): HistoryState {
+  return commit(state, {
+    ...state.present,
+    venues: state.present.venues.map((v) =>
+      v.id === venueId ? { ...v, segments: v.segments.map(fn) } : v,
+    ),
+  });
+}
+
+function venueOf(state: RundownState, venueId: string) {
+  return state.venues.find((v) => v.id === venueId);
 }
 
 export function rundownReducer(state: HistoryState, action: RundownAction): HistoryState {
@@ -73,19 +109,31 @@ export function rundownReducer(state: HistoryState, action: RundownAction): Hist
     case 'RESET':
       return commit(state, createDefaultShow());
 
-    case 'UPDATE_DURATION':
-      return mapSegments(state, (s) =>
+    case 'UPDATE_DURATION': {
+      if (isLocked(lockedIdsByVenue(state.present), action.venueId, action.id)) return state;
+      return mapVenueSegments(state, action.venueId, (s) =>
         s.id === action.id ? { ...s, duration: clampDuration(s, action.duration) } : s,
       );
+    }
 
     case 'UPDATE_TITLE': {
       const title = action.title.trim();
       if (!title) return state;
-      return mapSegments(state, (s) => (s.id === action.id ? { ...s, title } : s));
+      if (isLocked(lockedIdsByVenue(state.present), action.venueId, action.id)) return state;
+      return mapVenueSegments(state, action.venueId, (s) => (s.id === action.id ? { ...s, title } : s));
     }
 
-    case 'CHANGE_KIND':
-      return mapSegments(state, (s) => {
+    case 'UPDATE_RESOURCES': {
+      if (isLocked(lockedIdsByVenue(state.present), action.venueId, action.id)) return state;
+      const resources = [...new Set(action.resources.map((r) => r.trim()).filter(Boolean))];
+      return mapVenueSegments(state, action.venueId, (s) =>
+        s.id === action.id ? { ...s, resources } : s,
+      );
+    }
+
+    case 'CHANGE_KIND': {
+      if (isLocked(lockedIdsByVenue(state.present), action.venueId, action.id)) return state;
+      return mapVenueSegments(state, action.venueId, (s) => {
         if (s.id !== action.id) return s;
         const kind = action.kind;
         return {
@@ -98,54 +146,131 @@ export function rundownReducer(state: HistoryState, action: RundownAction): Hist
               : 0,
         };
       });
+    }
 
     case 'TOGGLE_FIXED': {
-      const target = state.present.segments.find((s) => s.id === action.id);
-      if (!target) return state;
+      const locks = lockedIdsByVenue(state.present);
+      if (isLocked(locks, action.venueId, action.id)) return state;
+      const venue = venueOf(state.present, action.venueId);
+      const target = venue?.segments.find((s) => s.id === action.id);
+      if (!venue || !target) return state;
       if (target.kind === 'fixed') {
-        return mapSegments(state, (s) =>
+        return mapVenueSegments(state, action.venueId, (s) =>
           s.id === action.id ? { ...s, kind: 'normal', fixedStartOffset: undefined } : s,
         );
       }
       // 以当前排程中的开始时间作为固定开播点，设置后不扰动现有流程
-      const schedule = computeSchedule(state.present.segments);
+      const schedule = computeVenueSchedule(venue, state.present.executedUntil[venue.id] ?? 0).result;
       const row = schedule.rows.find((r) => r.kind === 'segment' && r.segment.id === action.id);
       const offset = row && row.kind === 'segment' ? row.startOffset : 0;
-      return mapSegments(state, (s) =>
+      return mapVenueSegments(state, action.venueId, (s) =>
         s.id === action.id ? { ...s, kind: 'fixed', fixedStartOffset: offset, minDuration: 0 } : s,
       );
     }
 
-    case 'UPDATE_FIXED_START':
-      return mapSegments(state, (s) =>
+    case 'UPDATE_FIXED_START': {
+      if (isLocked(lockedIdsByVenue(state.present), action.venueId, action.id)) return state;
+      return mapVenueSegments(state, action.venueId, (s) =>
         s.id === action.id && s.kind === 'fixed'
           ? { ...s, fixedStartOffset: Math.max(0, Math.round(action.offset)) }
           : s,
       );
+    }
 
     case 'REORDER': {
-      const { from, to } = action;
-      const segments = [...state.present.segments];
+      const { venueId, from, to } = action;
+      const venue = venueOf(state.present, venueId);
+      if (!venue) return state;
+      const segments = [...venue.segments];
       if (from < 0 || from >= segments.length || to < 0 || to > segments.length) return state;
       if (from === to || from + 1 === to) return state;
+      // 已执行前缀内的环节位置不可改变
+      const locks = lockedIdsByVenue(state.present);
+      const lastLocked = lastLockedIndex(venue, locks.get(venueId) ?? new Set());
+      if (from <= lastLocked || to <= lastLocked) return state;
       const [moved] = segments.splice(from, 1);
       segments.splice(from < to ? to - 1 : to, 0, moved);
-      return commit(state, { ...state.present, segments });
+      return commit(state, {
+        ...state.present,
+        venues: state.present.venues.map((v) => (v.id === venueId ? { ...v, segments } : v)),
+      });
     }
 
     case 'INSERT_AT': {
-      const segments = [...state.present.segments];
-      const index = Math.max(0, Math.min(Math.round(action.index), segments.length));
-      segments.splice(index, 0, action.segment);
-      return commit(state, { ...state.present, segments });
+      const venue = venueOf(state.present, action.venueId);
+      if (!venue) return state;
+      const locks = lockedIdsByVenue(state.present);
+      const lastLocked = lastLockedIndex(venue, locks.get(action.venueId) ?? new Set());
+      const index = Math.max(0, Math.min(Math.round(action.index), venue.segments.length));
+      if (index <= lastLocked) return state; // 不能在已执行前缀之前插入
+      const segment: Segment = { ...action.segment, resources: action.segment.resources ?? [] };
+      const segments = [...venue.segments];
+      segments.splice(index, 0, segment);
+      return commit(state, {
+        ...state.present,
+        venues: state.present.venues.map((v) => (v.id === action.venueId ? { ...v, segments } : v)),
+      });
     }
 
     case 'DELETE': {
-      if (state.present.segments.length <= 1) return state;
+      const venue = venueOf(state.present, action.venueId);
+      if (!venue || venue.segments.length <= 1) return state;
+      if (isLocked(lockedIdsByVenue(state.present), action.venueId, action.id)) return state;
       return commit(state, {
         ...state.present,
-        segments: state.present.segments.filter((s) => s.id !== action.id),
+        venues: state.present.venues.map((v) =>
+          v.id === action.venueId
+            ? { ...v, segments: v.segments.filter((s) => s.id !== action.id) }
+            : v,
+        ),
       });
+    }
+
+    case 'MOVE_BETWEEN_VENUES': {
+      const { segmentId, fromVenueId, toVenueId } = action;
+      if (fromVenueId === toVenueId) return state;
+      const target = venueOf(state.present, toVenueId);
+      if (!venueOf(state.present, fromVenueId) || !target) return state;
+      const locks = lockedIdsByVenue(state.present);
+      if (isLocked(locks, fromVenueId, segmentId)) return state;
+      const index = Math.max(0, Math.min(Math.round(action.index), target.segments.length));
+      if (index <= lastLockedIndex(target, locks.get(toVenueId) ?? new Set())) return state;
+      return commit(state, applyOps(state.present, [{ type: 'move', segmentId, fromVenueId, toVenueId, index }]));
+    }
+
+    case 'APPLY_OPS': {
+      const locks = lockedIdsByVenue(state.present);
+      for (const op of action.ops) {
+        if (op.type === 'set-duration') {
+          if (isLocked(locks, op.venueId, op.segmentId)) return state;
+        } else if (op.type === 'insert') {
+          const venue = venueOf(state.present, op.venueId);
+          if (!venue) return state;
+          const index = Math.max(0, Math.min(Math.round(op.index), venue.segments.length));
+          if (index <= lastLockedIndex(venue, locks.get(op.venueId) ?? new Set())) return state;
+        } else {
+          const target = venueOf(state.present, op.toVenueId);
+          if (!venueOf(state.present, op.fromVenueId) || !target) return state;
+          if (isLocked(locks, op.fromVenueId, op.segmentId)) return state;
+          const index = Math.max(0, Math.min(Math.round(op.index), target.segments.length));
+          if (index <= lastLockedIndex(target, locks.get(op.toVenueId) ?? new Set())) return state;
+        }
+      }
+      return commit(state, applyOps(state.present, action.ops));
+    }
+
+    case 'LOCK_EXECUTED': {
+      const offset = Math.max(0, Math.round(action.offset));
+      if (offset <= 0) return state;
+      return commit(state, {
+        ...state.present,
+        executedUntil: Object.fromEntries(state.present.venues.map((v) => [v.id, offset])),
+      });
+    }
+
+    case 'CLEAR_EXECUTED_LOCKS': {
+      if (Object.keys(state.present.executedUntil).length === 0) return state;
+      return commit(state, { ...state.present, executedUntil: {} });
     }
 
     case 'SET_SHOW_START':

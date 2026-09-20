@@ -9,8 +9,12 @@ const seg = (s: Partial<Segment> & { id: string }): Segment => ({
   kind: 'normal',
   duration: 60,
   minDuration: 0,
+  resources: [],
   ...s,
 });
+
+/** 主舞台环节列表：与原版单时间线内置节目单一致 */
+const mainSegments = () => createDefaultShow().venues[0].segments;
 
 const rowOf = (r: ScheduleResult, id: string): ScheduledRow => {
   const row = r.rows.find((x): x is ScheduledRow => x.kind === 'segment' && x.segment.id === id);
@@ -40,8 +44,7 @@ describe('时间传播（整体顺延）', () => {
   });
 
   it('固定点之后的调整不影响固定点本身，只顺延尾部', () => {
-    const show = createDefaultShow();
-    const extended = show.segments.map((s) =>
+    const extended = mainSegments().map((s) =>
       s.id === 'comment' ? { ...s, duration: s.duration + 120 } : s,
     );
     const r = computeSchedule(extended);
@@ -54,8 +57,7 @@ describe('时间传播（整体顺延）', () => {
 
 describe('固定点：缓冲与压缩消化超时', () => {
   it('采访延长 4 分钟：缓冲耗尽、新闻被压缩、连线与片尾准点', () => {
-    const show = createDefaultShow();
-    const extended = show.segments.map((s) =>
+    const extended = mainSegments().map((s) =>
       s.id === 'interview' ? { ...s, duration: s.duration + 240 } : s,
     );
     const r = computeSchedule(extended);
@@ -79,8 +81,7 @@ describe('固定点：缓冲与压缩消化超时', () => {
   });
 
   it('小超时只消耗缓冲，不动可压缩环节', () => {
-    const show = createDefaultShow();
-    const extended = show.segments.map((s) =>
+    const extended = mainSegments().map((s) =>
       s.id === 'interview' ? { ...s, duration: s.duration + 120 } : s,
     );
     const r = computeSchedule(extended);
@@ -91,9 +92,8 @@ describe('固定点：缓冲与压缩消化超时', () => {
   });
 
   it('压缩不会超过环节下限', () => {
-    const show = createDefaultShow();
     // 开场 +6:00，恰好等于消化能力上限（缓冲 2:00 + 新闻 2:00 + 采访 2:00）
-    const extended = show.segments.map((s) =>
+    const extended = mainSegments().map((s) =>
       s.id === 'opening' ? { ...s, duration: s.duration + 360 } : s,
     );
     const r = computeSchedule(extended);
@@ -141,8 +141,7 @@ describe('固定点冲突', () => {
 
 describe('空档与多固定点', () => {
   it('固定点前内容不足时留出空档，固定点仍准点', () => {
-    const show = createDefaultShow();
-    const shortened = show.segments.map((s) =>
+    const shortened = mainSegments().map((s) =>
       s.id === 'news' ? { ...s, duration: 120 } : s,
     );
     const r = computeSchedule(shortened);
@@ -175,7 +174,7 @@ describe('空档与多固定点', () => {
 
 describe('余量统计', () => {
   it('缓冲余量与可消化余量', () => {
-    const r = computeSchedule(createDefaultShow().segments);
+    const r = computeSchedule(mainSegments());
     expect(r.bufferRemaining).toBe(120);
     expect(r.absorbableRemaining).toBe(120 + (300 - 180) + (360 - 240)); // 360
     expect(r.totalPlanned).toBe(1800);

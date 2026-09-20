@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useReducer } from 'react';
-import { computeSchedule } from './engine/schedule';
+import { computeShowSchedule } from './engine/multiSchedule';
 import { createInitialHistory, rundownReducer } from './store/reducer';
 import { loadHistory, saveHistory } from './store/persistence';
 import { RundownProvider } from './store/RundownContext';
@@ -23,8 +23,8 @@ export default function App() {
     saveHistory(history);
   }, [history]);
 
-  // 时间轴、消化明细、冲突全部由 present 推导
-  const schedule = useMemo(() => computeSchedule(history.present.segments), [history.present.segments]);
+  // 各场地时间轴、消化明细、固定点冲突、跨场地资源冲突全部由 present 推导
+  const schedule = useMemo(() => computeShowSchedule(history.present), [history.present]);
   const playhead = usePlayhead(schedule.endOffset);
 
   // 快捷键：空格 播放/暂停，Ctrl/⌘+Z 撤销，Ctrl/⌘+Shift+Z / Ctrl+Y 重做
@@ -65,8 +65,9 @@ export default function App() {
         <AlertsPanel />
         <RundownTable playheadOffset={playhead.offset} />
         <footer className="footer-hints">
-          拖动 ⠿ 排序 · 点击时长修改 · 📌 设为固定开播点 · 空格 播放/暂停 · Ctrl/⌘+Z 撤销 ·
-          Ctrl/⌘+Shift+Z 重做 · 数据自动保存在浏览器本地
+          拖动 ⠿ 在本场地排序或移到另一场地 · 点击时长修改 · 🏷 编辑共享资源 · 📌 设为固定开播点 ·
+          ▶ 预演后可「锁定已执行前缀」· 空格 播放/暂停 · Ctrl/⌘+Z 撤销 · Ctrl/⌘+Shift+Z 重做 ·
+          数据自动保存在浏览器本地
         </footer>
       </div>
     </RundownProvider>

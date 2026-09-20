@@ -7,11 +7,14 @@ import { uid } from '../store/reducer';
 import type { SegmentKind } from '../types';
 
 interface Props {
+  venueId: string;
   row: ScheduledRow;
   segIndex: number;
   showStartSeconds: number;
   isCurrent: boolean;
   isConflict: boolean;
+  isResourceConflict: boolean;
+  isLocked: boolean;
   dropBefore: boolean;
   dragging: boolean;
   onDragStart: () => void;
@@ -21,13 +24,25 @@ interface Props {
 }
 
 export function SegmentRowView(props: Props) {
-  const { row, segIndex, showStartSeconds, isCurrent, isConflict, dropBefore, dragging } = props;
+  const {
+    venueId,
+    row,
+    segIndex,
+    showStartSeconds,
+    isCurrent,
+    isConflict,
+    isResourceConflict,
+    isLocked,
+    dropBefore,
+    dragging,
+  } = props;
   const { dispatch } = useRundown();
   const seg = row.segment;
 
   const [editingDur, setEditingDur] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [editingFixed, setEditingFixed] = useState(false);
+  const [editingResources, setEditingResources] = useState(false);
   const [dragEnabled, setDragEnabled] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -39,12 +54,12 @@ export function SegmentRowView(props: Props) {
 
   const commitDuration = (text: string) => {
     const parsed = parseDuration(text);
-    if (parsed !== null) dispatch({ type: 'UPDATE_DURATION', id: seg.id, duration: parsed });
+    if (parsed !== null) dispatch({ type: 'UPDATE_DURATION', venueId, id: seg.id, duration: parsed });
     setEditingDur(false);
   };
 
   const commitTitle = (text: string) => {
-    dispatch({ type: 'UPDATE_TITLE', id: seg.id, title: text });
+    dispatch({ type: 'UPDATE_TITLE', venueId, id: seg.id, title: text });
     setEditingTitle(false);
   };
 
@@ -53,11 +68,22 @@ export function SegmentRowView(props: Props) {
     if (parsed !== null) {
       dispatch({
         type: 'UPDATE_FIXED_START',
+        venueId,
         id: seg.id,
         offset: Math.max(0, parsed - showStartSeconds),
       });
     }
     setEditingFixed(false);
+  };
+
+  const commitResources = (text: string) => {
+    dispatch({
+      type: 'UPDATE_RESOURCES',
+      venueId,
+      id: seg.id,
+      resources: text.split(/[,，、]/),
+    });
+    setEditingResources(false);
   };
 
   const className = [
@@ -66,6 +92,8 @@ export function SegmentRowView(props: Props) {
     `k-${seg.kind}`,
     isCurrent ? 'row-current' : '',
     isConflict ? 'row-conflict' : '',
+    isResourceConflict ? 'row-res-conflict' : '',
+    isLocked ? 'row-locked' : '',
     dropBefore ? 'drop-before' : '',
     dragging ? 'dragging' : '',
   ]
@@ -76,7 +104,7 @@ export function SegmentRowView(props: Props) {
     <div
       ref={ref}
       className={className}
-      draggable={dragEnabled}
+      draggable={dragEnabled && !isLocked}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move';
         props.onDragStart();
@@ -90,11 +118,11 @@ export function SegmentRowView(props: Props) {
     >
       <span
         className="grip"
-        title="拖动排序"
-        onMouseDown={() => setDragEnabled(true)}
+        title={isLocked ? '已执行锁定，不可拖动' : '拖动排序 / 拖到另一场地'}
+        onMouseDown={() => !isLocked && setDragEnabled(true)}
         onMouseUp={() => setDragEnabled(false)}
       >
-        ⠿
+        {isLocked ? '🔒' : '⠿'}
       </span>
       <span className="mono muted">{segIndex + 1}</span>
 
@@ -102,11 +130,12 @@ export function SegmentRowView(props: Props) {
         <select
           className={`badge k-${seg.kind}`}
           value={seg.kind}
-          disabled={seg.kind === 'fixed'}
-          title={seg.kind === 'fixed' ? '固定环节（用 ⚓ 取消固定）' : '环节类型'}
+          disabled={seg.kind === 'fixed' || isLocked}
+          title={seg.kind === 'fixed' ? '固定环节（用 ⚓ 取消固定）' : isLocked ? '已执行锁定' : '环节类型'}
           onChange={(e) =>
             dispatch({
               type: 'CHANGE_KIND',
+              venueId,
               id: seg.id,
               kind: e.target.value as Exclude<SegmentKind, 'fixed'>,
             })
@@ -117,7 +146,7 @@ export function SegmentRowView(props: Props) {
           <option value="buffer">缓冲</option>
           {seg.kind === 'fixed' && <option value="fixed">固定</option>}
         </select>
-        {editingTitle ? (
+        {editingTitle && !isLocked ? (
           <input
             className="inline title-input"
             defaultValue={seg.title}
@@ -130,12 +159,16 @@ export function SegmentRowView(props: Props) {
             }}
           />
         ) : (
-          <span className="seg-title" onDoubleClick={() => setEditingTitle(true)} title="双击改名">
+          <span
+            className="seg-title"
+            onDoubleClick={() => !isLocked && setEditingTitle(true)}
+            title={isLocked ? '已执行锁定' : '双击改名'}
+          >
             {seg.title}
           </span>
         )}
         {seg.kind === 'fixed' &&
-          (editingFixed ? (
+          (editingFixed && !isLocked ? (
             <input
               className="inline fixed-input"
               defaultValue={fmtClock(showStartSeconds + (seg.fixedStartOffset ?? 0))}
@@ -150,19 +183,43 @@ export function SegmentRowView(props: Props) {
           ) : (
             <button
               className="fixed-chip"
-              title="固定开播点，点击修改（HH:MM）"
-              onClick={() => setEditingFixed(true)}
+              title={isLocked ? '已执行锁定' : '固定开播点，点击修改（HH:MM）'}
+              onClick={() => !isLocked && setEditingFixed(true)}
             >
               ⚓ {fmtClock(showStartSeconds + (seg.fixedStartOffset ?? 0))}
             </button>
           ))}
+        {editingResources && !isLocked ? (
+          <input
+            className="inline res-input"
+            defaultValue={seg.resources.join(',')}
+            placeholder="资源，逗号分隔"
+            autoFocus
+            onFocus={(e) => e.target.select()}
+            onBlur={(e) => commitResources(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+              if (e.key === 'Escape') setEditingResources(false);
+            }}
+          />
+        ) : (
+          seg.resources.length > 0 && (
+            <span className="res-chips" title="占用的共享资源（跨场地统一校验）">
+              {seg.resources.map((r) => (
+                <span key={r} className={`res-chip${isResourceConflict ? ' res-conflict' : ''}`}>
+                  {r}
+                </span>
+              ))}
+            </span>
+          )
+        )}
       </span>
 
       <span className="mono">{fmtClock(showStartSeconds + row.startOffset)}</span>
       <span className="mono">{fmtClock(showStartSeconds + row.endOffset)}</span>
 
       <span className="cell-dur">
-        {editingDur ? (
+        {editingDur && !isLocked ? (
           <input
             className="inline dur-input"
             defaultValue={fmtDur(seg.duration)}
@@ -177,7 +234,8 @@ export function SegmentRowView(props: Props) {
         ) : (
           <button
             className="dur-chip mono"
-            title="点击修改时长（如 6:00 或 6，单位分钟）"
+            title={isLocked ? '已执行锁定' : '点击修改时长（如 6:00 或 6，单位分钟）'}
+            disabled={isLocked}
             onClick={() => setEditingDur(true)}
           >
             {fmtDur(seg.duration)}
@@ -188,55 +246,68 @@ export function SegmentRowView(props: Props) {
             → {fmtDur(row.computedDuration)}
           </span>
         )}
-        <span className="bump">
-          <button
-            className="icon-btn"
-            title="减少 30 秒"
-            onClick={() => dispatch({ type: 'UPDATE_DURATION', id: seg.id, duration: seg.duration - 30 })}
-          >
-            −
-          </button>
-          <button
-            className="icon-btn"
-            title="增加 30 秒"
-            onClick={() => dispatch({ type: 'UPDATE_DURATION', id: seg.id, duration: seg.duration + 30 })}
-          >
-            ＋
-          </button>
-        </span>
+        {!isLocked && (
+          <span className="bump">
+            <button
+              className="icon-btn"
+              title="减少 30 秒"
+              onClick={() => dispatch({ type: 'UPDATE_DURATION', venueId, id: seg.id, duration: seg.duration - 30 })}
+            >
+              −
+            </button>
+            <button
+              className="icon-btn"
+              title="增加 30 秒"
+              onClick={() => dispatch({ type: 'UPDATE_DURATION', venueId, id: seg.id, duration: seg.duration + 30 })}
+            >
+              ＋
+            </button>
+          </span>
+        )}
       </span>
 
       <span className="cell-status">
-        {seg.kind === 'compressible' && (
+        {isLocked && <span className="muted">已执行</span>}
+        {!isLocked && seg.kind === 'compressible' && (
           <span className={compressed ? 'warn-text' : 'muted'}>
             可压至 {fmtDur(seg.minDuration)}
             {compressed && ` · 已压 ${fmtDur(row.compressedBy)}`}
           </span>
         )}
-        {seg.kind === 'buffer' &&
+        {!isLocked && seg.kind === 'buffer' &&
           (row.computedDuration > 0 ? (
             <span className="ok-text">余 {fmtDur(row.computedDuration)}</span>
           ) : (
             <span className="bad-text">已耗尽</span>
           ))}
-        {seg.kind === 'normal' && <span className="muted">整体顺延</span>}
-        {seg.kind === 'fixed' &&
+        {!isLocked && seg.kind === 'normal' && <span className="muted">整体顺延</span>}
+        {!isLocked && seg.kind === 'fixed' &&
           (isConflict ? (
             <span className="bad-text">固定点冲突</span>
           ) : (
             <span className="ok-text">准点锁定</span>
           ))}
+        {isResourceConflict && <span className="bad-text"> · 资源冲突</span>}
       </span>
 
       <span className="cell-actions">
         <button
           className="icon-btn"
-          title={seg.kind === 'fixed' ? '取消固定' : '设为固定开播点（锁定当前开始时间）'}
-          onClick={() => dispatch({ type: 'TOGGLE_FIXED', id: seg.id })}
+          title={isLocked ? '已执行锁定' : seg.kind === 'fixed' ? '取消固定' : '设为固定开播点（锁定当前开始时间）'}
+          disabled={isLocked}
+          onClick={() => dispatch({ type: 'TOGGLE_FIXED', venueId, id: seg.id })}
         >
           {seg.kind === 'fixed' ? '⚓' : '📌'}
         </button>
-        <button className="icon-btn" title="改名" onClick={() => setEditingTitle(true)}>
+        <button
+          className="icon-btn"
+          title={isLocked ? '已执行锁定' : '编辑共享资源（逗号分隔）'}
+          disabled={isLocked}
+          onClick={() => setEditingResources(true)}
+        >
+          🏷
+        </button>
+        <button className="icon-btn" title="改名" disabled={isLocked} onClick={() => setEditingTitle(true)}>
           ✎
         </button>
         <button
@@ -245,8 +316,9 @@ export function SegmentRowView(props: Props) {
           onClick={() =>
             dispatch({
               type: 'INSERT_AT',
+              venueId,
               index: segIndex + 1,
-              segment: { id: uid(), title: '新环节', kind: 'normal', duration: 120, minDuration: 0 },
+              segment: { id: uid(), title: '新环节', kind: 'normal', duration: 120, minDuration: 0, resources: [] },
             })
           }
         >
@@ -254,8 +326,9 @@ export function SegmentRowView(props: Props) {
         </button>
         <button
           className="icon-btn danger"
-          title="删除（可撤销）"
-          onClick={() => dispatch({ type: 'DELETE', id: seg.id })}
+          title={isLocked ? '已执行锁定，不可删除' : '删除（可撤销）'}
+          disabled={isLocked}
+          onClick={() => dispatch({ type: 'DELETE', venueId, id: seg.id })}
         >
           🗑
         </button>

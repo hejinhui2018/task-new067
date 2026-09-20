@@ -1,4 +1,4 @@
-import type { Segment } from '../types';
+import type { Segment, Venue } from '../types';
 
 /** 已排程的环节行：startOffset/endOffset 为距开播的秒数 */
 export interface ScheduledRow {
@@ -77,8 +77,13 @@ export interface ScheduleResult {
  *    到本固定点之间」的缓冲段里扣，再按流程顺序压缩可压缩环节（压到下限为止）。
  * 3. 消化能力耗尽仍放不下 → 记录冲突；固定点仍在原时刻开播，绝不悄悄后移。
  * 4. 固定点前内容不足 → 留出空档，固定点依然准点。
+ * 5. 已执行前缀（lockedIds）：已播出的环节既不能被压缩消化，时长也不再变化——
+ *    消化跳过它们；若因此消化不下，按规则 3 报冲突，不改写已执行内容。
  */
-export function computeSchedule(segments: Segment[]): ScheduleResult {
+export function computeSchedule(
+  segments: Segment[],
+  lockedIds?: ReadonlySet<string>,
+): ScheduleResult {
   const rows: TimelineRow[] = [];
   const adjustments: Adjustment[] = [];
   const conflicts: Conflict[] = [];
@@ -122,6 +127,7 @@ export function computeSchedule(segments: Segment[]): ScheduleResult {
         for (const row of zoneRows) {
           if (remaining <= 0) break;
           if (!kinds.includes(row.segment.kind)) continue;
+          if (lockedIds?.has(row.segment.id)) continue; // 已执行的环节不可再消化
           const available = row.computedDuration - row.segment.minDuration;
           if (available <= 0) continue;
           const take = Math.min(available, remaining);
@@ -194,4 +200,46 @@ export function computeSchedule(segments: Segment[]): ScheduleResult {
       .reduce((sum, r) => sum + Math.max(0, r.computedDuration - r.segment.minDuration), 0);
 
   return { rows, adjustments, conflicts, endOffset, totalPlanned, bufferRemaining, absorbableRemaining };
+}
+
+/** 一个场地的排程结果 + 该场地被「已执行前缀」锁定的环节集合 */
+export interface VenueSchedule {
+  venue: Venue;
+  result: ScheduleResult;
+  lockedIds: Set<string>;
+}
+
+/**
+ * 由「已执行行至」偏移推导锁定集合：
+ * 排程开始时刻早于 executedUntil 的环节即视为已执行（已播出的内容不可改写）。
+ */
+export function lockedIdsFor(result: ScheduleResult, executedUntil: number): Set<string> {
+  const ids = new Set<string>();
+  if (executedUntil <= 0) return ids;
+  for (const row of result.rows) {
+    if (row.kind === 'segment' && row.startOffset < executedUntil) ids.add(row.segment.id);
+  }
+  return ids;
+}
+
+const LOCK_FIXPOINT_MAX_PASSES = 4;
+
+/**
+ * 计算单个场地的排程（含已执行前缀锁定）。
+ *
+ * 锁定集合与排程互相依赖：锁定影响消化 → 影响排程 → 影响哪些环节落在锁定线之前。
+ * 从空锁定集开始迭代至不动点。已执行环节构成时间轴前缀、且永不被压缩，
+ * 其开始时刻在迭代中只会前移不会越过锁定线，通常两轮内收敛。
+ */
+export function computeVenueSchedule(venue: Venue, executedUntil: number): VenueSchedule {
+  let lockedIds = new Set<string>();
+  let result = computeSchedule(venue.segments, lockedIds);
+  for (let pass = 0; pass < LOCK_FIXPOINT_MAX_PASSES; pass++) {
+    const next = lockedIdsFor(result, executedUntil);
+    const same = next.size === lockedIds.size && [...next].every((id) => lockedIds.has(id));
+    if (same) return { venue, result, lockedIds: next };
+    lockedIds = next;
+    result = computeSchedule(venue.segments, lockedIds);
+  }
+  return { venue, result, lockedIds };
 }
