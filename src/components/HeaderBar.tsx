@@ -3,6 +3,7 @@ import { fmtClock, fmtDur, fmtSignedDur, parseClock } from '../engine/time';
 import type { ScheduledRow } from '../engine/schedule';
 import { useRundown } from '../store/RundownContext';
 import type { Playhead } from '../hooks/usePlayhead';
+import type { VenueId } from '../types';
 
 function Stat({ label, value, tone, title }: { label: string; value: React.ReactNode; tone?: 'ok' | 'warn' | 'bad'; title?: string }) {
   return (
@@ -13,25 +14,32 @@ function Stat({ label, value, tone, title }: { label: string; value: React.React
   );
 }
 
+const VENUE_TAG: Record<VenueId, string> = { A: '主', B: '访' };
+
 export function HeaderBar({ playhead }: { playhead: Playhead }) {
-  const { present, schedule, dispatch, canUndo, canRedo } = useRundown();
+  const { present, show, dispatch, canUndo, canRedo } = useRundown();
   const [editingStart, setEditingStart] = useState(false);
 
-  const diff = schedule.endOffset - present.slotDuration;
+  const diff = show.endOffset - present.slotDuration;
   const fixedCount = present.segments.filter((s) => s.kind === 'fixed').length;
-  const conflictCount = schedule.conflicts.length;
+  const conflictCount = show.fixedConflicts.length + show.resourceConflicts.length;
 
-  const currentRow = schedule.rows.find(
-    (r): r is ScheduledRow =>
-      r.kind === 'segment' && playhead.offset >= r.startOffset && playhead.offset < r.endOffset,
-  );
+  // 播放头当前所在环节（可能同时命中两个场地）
+  const current: Array<{ venueId: VenueId; row: ScheduledRow }> = [];
+  for (const vs of show.venues) {
+    const row = vs.schedule.rows.find(
+      (r): r is ScheduledRow =>
+        r.kind === 'segment' && playhead.offset >= r.startOffset && playhead.offset < r.endOffset,
+    );
+    if (row) current.push({ venueId: vs.venueId, row });
+  }
 
   return (
     <header className="topbar">
       <div className="brand">
         <span className="live-dot" aria-hidden />
         <div>
-          <h1>{present.showName} · 导播流程单</h1>
+          <h1>{present.showName} · 双场地联排</h1>
           <div className="sub">
             开播{' '}
             {editingStart ? (
@@ -55,38 +63,39 @@ export function HeaderBar({ playhead }: { playhead: Playhead }) {
                 {fmtClock(present.showStartSeconds)}
               </button>
             )}{' '}
-            · 播出窗口 {fmtDur(present.slotDuration)}
+            · 播出窗口 {fmtDur(present.slotDuration)} · 主舞台 / 访谈间 两条时间线独立调整，共享资源统一校验
           </div>
         </div>
       </div>
 
       <div className="stats">
         <Stat
-          label="当前总时长"
+          label="最晚收尾"
           tone={diff > 0 ? 'bad' : 'ok'}
-          title={`计划 ${fmtDur(schedule.totalPlanned)} · 窗口 ${fmtDur(present.slotDuration)}`}
+          title={`计划最长 ${fmtDur(show.totalPlanned)} · 窗口 ${fmtDur(present.slotDuration)}`}
           value={
             <>
-              {fmtDur(schedule.endOffset)}{' '}
+              {fmtDur(show.endOffset)}{' '}
               <span className={`chip ${diff > 0 ? 'bad' : diff < 0 ? 'warn' : 'ok'}`}>
                 {diff === 0 ? '准点' : fmtSignedDur(diff)}
               </span>
             </>
           }
         />
-        <Stat label="收尾时刻" value={fmtClock(present.showStartSeconds + schedule.endOffset)} />
+        <Stat label="收尾时刻" value={fmtClock(present.showStartSeconds + show.endOffset)} />
         <Stat
           label="缓冲余量"
-          tone={schedule.bufferRemaining > 0 ? 'ok' : 'bad'}
-          title="所有缓冲段剩余时长之和"
-          value={fmtDur(schedule.bufferRemaining)}
+          tone={show.bufferRemaining > 0 ? 'ok' : 'bad'}
+          title="两场地所有缓冲段剩余时长之和"
+          value={fmtDur(show.bufferRemaining)}
         />
         <Stat
           label="可消化余量"
-          title="缓冲剩余 + 可压缩环节剩余可压量（固定点前还能吸收的超时）"
-          value={fmtDur(schedule.absorbableRemaining)}
+          title="两场地缓冲剩余 + 可压缩环节剩余可压量"
+          value={fmtDur(show.absorbableRemaining)}
         />
         <Stat label="固定开播点" value={`${fixedCount} 个`} />
+        <Stat label="已执行锁定" value={`${show.lockedCount} 段`} />
         <Stat
           label="冲突"
           tone={conflictCount > 0 ? 'bad' : 'ok'}
@@ -101,7 +110,7 @@ export function HeaderBar({ playhead }: { playhead: Playhead }) {
         <button className="btn" disabled={!canRedo} onClick={() => dispatch({ type: 'REDO' })} title="重做 (Ctrl/⌘+Shift+Z)">
           ↷ 重做
         </button>
-        <button className="btn" onClick={() => dispatch({ type: 'RESET' })} title="恢复内置的 30 分钟节目单（可撤销）">
+        <button className="btn" onClick={() => dispatch({ type: 'RESET' })} title="恢复双场地示例节目单（可撤销）">
           ⟲ 重置
         </button>
         <span className="divider" />
@@ -130,7 +139,8 @@ export function HeaderBar({ playhead }: { playhead: Playhead }) {
         </button>
         <span className="playhead-readout">
           {fmtClock(present.showStartSeconds + playhead.offset)}
-          {currentRow ? ` · ${currentRow.segment.title} · 剩余 ${fmtDur(currentRow.endOffset - playhead.offset)}` : ''}
+          {current.length > 0 &&
+            ` · ${current.map((c) => `${VENUE_TAG[c.venueId]} ${c.row.segment.title}`).join(' / ')}`}
         </span>
       </div>
     </header>

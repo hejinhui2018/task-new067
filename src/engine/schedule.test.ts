@@ -182,3 +182,59 @@ describe('余量统计', () => {
     expect(r.endOffset).toBe(1800);
   });
 });
+
+describe('已执行锁定前缀', () => {
+  it('锁定行按实际时刻锚定：前序环节延长不会推动它，后续环节也不倒灌', () => {
+    const r = computeSchedule([
+      seg({ id: 'a', duration: 120 }),
+      seg({ id: 'lk', duration: 120, locked: true, actualStartOffset: 120, actualEndOffset: 240 }),
+      seg({ id: 'c', duration: 120 }),
+    ]);
+    // 前序 a 延长 180 秒
+    const r2 = computeSchedule([
+      seg({ id: 'a', duration: 300 }),
+      seg({ id: 'lk', duration: 120, locked: true, actualStartOffset: 120, actualEndOffset: 240 }),
+      seg({ id: 'c', duration: 120 }),
+    ]);
+    expect(rowOf(r, 'lk').startOffset).toBe(120);
+    expect(rowOf(r2, 'lk').startOffset).toBe(120); // 锚点纹丝不动
+    expect(rowOf(r2, 'lk').locked).toBe(true);
+    expect(rowOf(r2, 'c').startOffset).toBe(240); // 紧跟锁定行，不被 a 推后
+  });
+
+  it('锁定行拦断消化区段：锚点之前的超时不会吃掉锚点之后的缓冲', () => {
+    const mk = (aDur: number) => [
+      seg({ id: 'a', duration: aDur }),
+      seg({ id: 'lk', duration: 60, locked: true, actualStartOffset: 120, actualEndOffset: 180 }),
+      seg({ id: 'buf', kind: 'buffer', duration: 300 }),
+      seg({ id: 'f', kind: 'fixed', duration: 60, fixedStartOffset: 480 }),
+    ];
+    const r = computeSchedule(mk(400)); // a 超时延伸到锁定行附近，但不跨锚点消化
+    expect(rowOf(r, 'lk').startOffset).toBe(120);
+    expect(rowOf(r, 'buf').computedDuration).toBe(300); // 缓冲未被前序超时消耗
+    expect(rowOf(r, 'f').startOffset).toBe(480);
+    expect(r.conflicts).toHaveLength(0);
+  });
+
+  it('锁定锚点之后的区段仍按原规则消化固定点超时', () => {
+    const r = computeSchedule([
+      seg({ id: 'lk', duration: 60, locked: true, actualStartOffset: 0, actualEndOffset: 120 }),
+      seg({ id: 'buf', kind: 'buffer', duration: 600 }),
+      seg({ id: 'f', kind: 'fixed', duration: 60, fixedStartOffset: 480 }),
+    ]);
+    // 自然开始 720，超时 240，由锚点之后的缓冲单独消化
+    expect(rowOf(r, 'buf').computedDuration).toBe(360);
+    expect(rowOf(r, 'buf').compressedBy).toBe(240);
+    expect(rowOf(r, 'f').startOffset).toBe(480);
+    expect(r.conflicts).toHaveLength(0);
+  });
+
+  it('锁定行不参与压缩：消化能力统计不含锁定的可压缩环节', () => {
+    const r = computeSchedule([
+      seg({ id: 'lk', kind: 'compressible', duration: 600, minDuration: 60, locked: true, actualStartOffset: 0, actualEndOffset: 600 }),
+      seg({ id: 'tail', duration: 60 }),
+    ]);
+    expect(rowOf(r, 'lk').computedDuration).toBe(600); // 锁多少就是多少
+    expect(rowOf(r, 'tail').startOffset).toBe(600);
+  });
+});

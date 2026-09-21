@@ -12,6 +12,8 @@ export interface ScheduledRow {
   computedDuration: number;
   /** 为保住固定点被压缩掉的秒数 */
   compressedBy: number;
+  /** 已执行锁定行：按实际时刻锚定，不参与顺延与消化 */
+  locked: boolean;
 }
 
 /** 固定点前的等待空档（内容不足时产生） */
@@ -73,17 +75,20 @@ export interface ScheduleResult {
  *
  * 规则：
  * 1. 普通调整整体顺延——每个环节紧跟前一环节。
- * 2. 固定开播点不可越过：固定环节之前的超时，先从「上一个固定点（或开播）
- *    到本固定点之间」的缓冲段里扣，再按流程顺序压缩可压缩环节（压到下限为止）。
+ * 2. 固定开播点不可越过：固定环节之前的超时，先从「上一个锚点（开播、已执行锁定行
+ *    或上一个固定点）到本固定点之间」的缓冲段里扣，再按流程顺序压缩可压缩环节（压到
+ *    下限为止）。消化只发生在同一区段内，不会跨锚点倒灌。
  * 3. 消化能力耗尽仍放不下 → 记录冲突；固定点仍在原时刻开播，绝不悄悄后移。
  * 4. 固定点前内容不足 → 留出空档，固定点依然准点。
+ * 5. 已执行锁定行（segment.locked）是硬锚点：按 actualStart/End 摆放，既不被顺延、
+ *    不被压缩，也把消化区段拦断——前缀之后的修改不会倒灌进已执行前缀。
  */
 export function computeSchedule(segments: Segment[]): ScheduleResult {
   const rows: TimelineRow[] = [];
   const adjustments: Adjustment[] = [];
   const conflicts: Conflict[] = [];
   let cursor = 0;
-  /** 当前消化区段内的环节行（上一个固定点之后、下一个固定点之前） */
+  /** 当前消化区段内的环节行（上一个锚点之后、下一个锚点之前；锚点=锁定行或固定点） */
   let zoneRows: ScheduledRow[] = [];
 
   /** 压缩后重排区段内各环节的开始/结束时间（第一行锚点不动） */
@@ -95,6 +100,26 @@ export function computeSchedule(segments: Segment[]): ScheduleResult {
   };
 
   for (const seg of segments) {
+    // 已执行锁定行：硬锚点，按实际时刻摆放并拦断消化区段
+    if (seg.locked) {
+      const start = seg.actualStartOffset ?? cursor;
+      const end = seg.actualEndOffset ?? start + seg.duration;
+      const row: ScheduledRow = {
+        kind: 'segment',
+        segment: seg,
+        startOffset: start,
+        endOffset: end,
+        plannedDuration: seg.duration,
+        computedDuration: end - start,
+        compressedBy: 0,
+        locked: true,
+      };
+      rows.push(row);
+      cursor = end;
+      zoneRows = [];
+      continue;
+    }
+
     if (seg.kind !== 'fixed') {
       const row: ScheduledRow = {
         kind: 'segment',
@@ -104,6 +129,7 @@ export function computeSchedule(segments: Segment[]): ScheduleResult {
         plannedDuration: seg.duration,
         computedDuration: seg.duration,
         compressedBy: 0,
+        locked: false,
       };
       rows.push(row);
       zoneRows.push(row);
@@ -176,6 +202,7 @@ export function computeSchedule(segments: Segment[]): ScheduleResult {
       plannedDuration: seg.duration,
       computedDuration: seg.duration,
       compressedBy: 0,
+      locked: false,
     });
     cursor = fixedAt + seg.duration;
     zoneRows = [];
